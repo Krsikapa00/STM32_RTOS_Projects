@@ -57,8 +57,13 @@
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 /* USER CODE BEGIN PFP */
-static void task1_handler(void* parameters);
-static void task2_handler(void* parameters);
+static void switch_priority(void);
+static void red_led_handler(void* parameters);
+static void yellow_led_handler(void* parameters);
+//static void onboard_led_handler(void* parameters);
+void button_interrupt_handler(void);
+
+//static void btn_press_handler(void* parameters);
 
 
 extern  void SEGGER_UART_init(uint32_t);
@@ -66,6 +71,12 @@ extern  void SEGGER_UART_init(uint32_t);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+TaskHandle_t red_led_handle;
+TaskHandle_t yellow_led_handle;
+//TaskHandle_t onboard_led_handle;
+TaskHandle_t btn_press_handle;
+
+BaseType_t volatile switch_status;
 
 /* USER CODE END 0 */
 
@@ -77,9 +88,6 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
-	TaskHandle_t task1_handle;
-	TaskHandle_t task2_handle;
 	BaseType_t status;
   /* USER CODE END 1 */
 
@@ -102,21 +110,26 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   /* USER CODE BEGIN 2 */
+  SEGGER_UART_init(500000);
 
 //  enable the CYCCNT Counter
   DWT_CTRL |= (1 << 0);
 
-  SEGGER_UART_init(500000);
 
 //  Start SEGGER
   SEGGER_SYSVIEW_Conf();
 //  SEGGER_SYSVIEW_Start();
 
-  status = xTaskCreate(task1_handler, "Task-1", 200, "Hello Task-1", 2, &task1_handle);
+
+  status = xTaskCreate(red_led_handler, "task1", 200, NULL, 2, &red_led_handle);
   configASSERT(status == pdPASS);
 
-  status = xTaskCreate(task2_handler, "Task-2", 200, "Hello Task-2", 2, &task2_handle);
+
+  status = xTaskCreate(yellow_led_handler, "task2", 200, NULL, 3, &yellow_led_handle);
   configASSERT(status == pdPASS);
+
+
+  switch_status = 0;
 
 //  Start scheduler
   vTaskStartScheduler();
@@ -229,7 +242,9 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
 
-
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
   HAL_GPIO_WritePin(EXT_LED_PORT, RED_LED_PIN, GPIO_PIN_RESET);
@@ -237,44 +252,146 @@ static void MX_GPIO_Init(void)
 
 
   /*Configure GPIO pin : RED_LED_PIN */
-  GPIO_InitStruct.Pin = RED_LED_PIN;
+  GPIO_InitStruct.Pin = RED_LED_PIN|YELLOW_LED_PIN;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(EXT_LED_PORT, &GPIO_InitStruct);
 
 
-  /*Configure GPIO pin : YELLOW_LED_PIN */
-  GPIO_InitStruct.Pin = YELLOW_LED_PIN;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(EXT_LED_PORT, &GPIO_InitStruct);
 /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
+void button_interrupt_handler(void)
+{
 
-static void task1_handler(void* parameters)
+	traceISR_ENTER();
+	switch_status = 1;
+	traceISR_EXIT();
+
+}
+
+
+void switch_priority(void)
+{
+	UBaseType_t task1_Prio, task2_Prio;
+	TaskHandle_t curr_task;
+	BaseType_t switch_Prio = 0;
+	portENTER_CRITICAL();
+
+	if (switch_status)
+	{
+		switch_status = 0;
+		switch_Prio = 1;
+	}
+	portEXIT_CRITICAL();
+
+	if (switch_Prio)
+	{
+//		t1 = xTaskGetHandle("task1");
+//		t2 = xTaskGetHandle("task2");
+
+		task1_Prio = uxTaskPriorityGet(red_led_handle);
+		task2_Prio = uxTaskPriorityGet(yellow_led_handle);
+
+		curr_task = xTaskGetCurrentTaskHandle();
+		if (curr_task == red_led_handle)
+		{
+			vTaskPrioritySet(red_led_handle, task2_Prio);
+			vTaskPrioritySet(yellow_led_handle, task1_Prio);
+		} else
+		{
+			vTaskPrioritySet(yellow_led_handle, task1_Prio);
+			vTaskPrioritySet(red_led_handle, task2_Prio);
+		}
+
+	}
+
+
+
+}
+
+
+//static void btn_press_handler(void* parameters)
+//{
+//	uint8_t btn_value = 0;
+//	uint8_t prev_value = 0;
+//
+//	UBaseType_t task1_Prio, task2_Prio;
+//
+//	while(1)
+//	{
+////		toggle every 1 second
+//		btn_value = HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin);
+//
+//		if (btn_value)
+//		{
+//			if (!prev_value)
+//			{
+//				SEGGER_SYSVIEW_PrintfTarget("Button Pressed");
+//
+//
+//
+//			}
+//		}
+//		prev_value = btn_value;
+//		vTaskDelay(pdMS_TO_TICKS(10));
+//
+//	}
+//}
+
+
+static void red_led_handler(void* parameters)
 {
 
 	while(1)
 	{
-		printf("%s\n", (char*)parameters);
+//		toggle every 1 second
+		SEGGER_SYSVIEW_PrintfTarget("Toggle RED");
+		HAL_GPIO_TogglePin(EXT_LED_PORT, RED_LED_PIN);
+		HAL_Delay(100);
+		switch_priority();
 
-//		Give up processor when done
-		taskYIELD();
 	}
 }
 
-static void task2_handler(void* parameters)
+static void yellow_led_handler(void* parameters)
 {
+
 	while(1)
 	{
-		printf("%s\n", (char*)parameters);
-		taskYIELD();
+//		Toggle every 800 ms
+		SEGGER_SYSVIEW_PrintfTarget("Toggle YELLOW");
+		HAL_GPIO_TogglePin(EXT_LED_PORT, YELLOW_LED_PIN);
+		HAL_Delay(1000);
+		switch_priority();
 	}
 }
+
+/*
+static void onboard_led_handler(void* parameters)
+{
+	BaseType_t status;
+	while(1)
+	{
+//		toggle every 400 ms
+		SEGGER_SYSVIEW_PrintfTarget("Toggle ONBAORD");
+		HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+
+		status = xTaskNotifyWait(0, 0, NULL, pdMS_TO_TICKS(400));
+		if (status == pdTRUE)
+		{
+			portENTER_CRITICAL(); //Disable Interrupts while accessing shared variable
+
+			next_LED_handle = NULL;
+			HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET); //Turn on light before suspending
+			vTaskSuspend(onboard_led_handle);
+			portEXIT_CRITICAL();
+
+		}
+	}
+}*/
 
 /* USER CODE END 4 */
 
