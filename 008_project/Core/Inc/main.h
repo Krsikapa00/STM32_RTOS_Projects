@@ -31,11 +31,53 @@ extern "C" {
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "FreeRTOS.h"
+#include "task.h"
+#include "queue.h"
+#include "stdio.h"
+#include "string.h"
+#include "timers.h"
+#include <stdint.h>
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
+typedef struct
+{
+	uint8_t payload[10];
+	uint8_t len;
+}command_t;
+
+typedef enum
+{
+	sMainMenu = 0,
+	sLedEffect,
+	sRtcMenu,
+	sRtcTimeConfig,
+	sRtcDateConfig,
+	sRtcReport
+}state_t;
+
+
+extern RTC_HandleTypeDef hrtc;
+extern UART_HandleTypeDef huart2;
+
+extern TaskHandle_t handle_led_task;
+extern TaskHandle_t handle_menu_task;
+extern TaskHandle_t handle_rtc_task;
+extern TaskHandle_t handle_print_task;
+extern TaskHandle_t handle_command_task;
+
+
+extern QueueHandle_t q_input_data;
+extern QueueHandle_t q_print_data;
+
+extern TimerHandle_t led_timer[3];
+extern TimerHandle_t rtc_timer;
+
+extern volatile command_t currCommand;
+extern state_t currState;
+
 
 /* USER CODE END ET */
 
@@ -53,6 +95,25 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
+void led_task_handler(void* parameters);
+void menu_task_handler(void* parameters);
+void rtc_task_handler(void* parameters);
+void print_task_handler(void* parameters);
+void command_task_handler(void* parameters);
+
+void LED_effect_1(void);
+void LED_effect_2(void);
+void LED_effect_3(void);
+void start_led_timers(int n);
+void stop_led_timers(void);
+void turn_on_all_leds(void);
+
+
+void rtc_get_curr_date_time_itm(void);
+void rtc_get_curr_date_time(void);
+void rtc_config_time(void);
+void rtc_config_date(void);
+
 
 /* USER CODE END EFP */
 
@@ -74,7 +135,10 @@ void Error_Handler(void);
 #define SWO_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
-
+#define DWT_CTRL 		(* (volatile uint32_t *) 0xE0001000)
+#define RED_LED_PIN		GPIO_PIN_10
+#define YELLOW_LED_PIN	GPIO_PIN_12
+#define EXT_LED_PORT	GPIOC
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

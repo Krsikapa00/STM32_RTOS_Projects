@@ -21,11 +21,6 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "FreeRTOS.h"
-#include "task.h"
-#include "stdio.h"
-#include <stdint.h>
-
 
 /* USER CODE END Includes */
 
@@ -36,10 +31,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define DWT_CTRL 		(* (volatile uint32_t *) 0xE0001000)
-#define RED_LED_PIN		GPIO_PIN_10
-#define YELLOW_LED_PIN	GPIO_PIN_12
-#define EXT_LED_PORT	GPIOC
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -48,6 +40,30 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+RTC_HandleTypeDef hrtc;
+
+UART_HandleTypeDef huart2;
+
+TaskHandle_t handle_led_task;
+TaskHandle_t handle_menu_task;
+TaskHandle_t handle_rtc_task;
+TaskHandle_t handle_print_task;
+TaskHandle_t handle_command_task;
+
+
+QueueHandle_t q_input_data;
+QueueHandle_t q_print_data;
+
+state_t currState = sMainMenu;
+
+TimerHandle_t led_timer[3];
+TimerHandle_t rtc_timer;
+
+volatile uint8_t user_data;
+
+volatile command_t currCommand;
+
+
 
 /* USER CODE BEGIN PV */
 
@@ -56,27 +72,18 @@
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_RTC_Init(void);
+static void MX_USART2_UART_Init(void);
+void led_timer_CallBack(TimerHandle_t xTimer);
+void rtc_timer_CallBack(TimerHandle_t xTimer);
+
 /* USER CODE BEGIN PFP */
-static void red_led_handler(void* parameters);
-static void yellow_led_handler(void* parameters);
-//static void onboard_led_handler(void* parameters);
-void button_interrupt_handler(void);
 
-void vApplicationIdleHook(void);
-//static void btn_press_handler(void* parameters);
-
-
-extern  void SEGGER_UART_init(uint32_t);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-TaskHandle_t red_led_handle;
-TaskHandle_t yellow_led_handle;
-//TaskHandle_t onboard_led_handle;
-TaskHandle_t btn_press_handle;
 
-BaseType_t volatile switch_status;
 
 /* USER CODE END 0 */
 
@@ -109,27 +116,54 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_RTC_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  SEGGER_UART_init(500000);
 
 //  enable the CYCCNT Counter
   DWT_CTRL |= (1 << 0);
 
 
-//  Start SEGGER
-  SEGGER_SYSVIEW_Conf();
-//  SEGGER_SYSVIEW_Start();
+//  Create Tasks
+  status = xTaskCreate(menu_task_handler, "menu_task", 200, NULL, 2, &handle_menu_task);
+  configASSERT(status == pdPASS);
 
-
-  status = xTaskCreate(red_led_handler, "task1", 200, NULL, 2, &red_led_handle);
+  status = xTaskCreate(led_task_handler, "led_task", 200, NULL, 2, &handle_led_task);
   configASSERT(status == pdPASS);
 
 
-  status = xTaskCreate(yellow_led_handler, "task2", 200, NULL, 3, &yellow_led_handle);
+  status = xTaskCreate(rtc_task_handler, "rtc_task", 250, NULL, 2, &handle_rtc_task);
   configASSERT(status == pdPASS);
 
+  status = xTaskCreate(print_task_handler, "print_task", 200, NULL, 2, &handle_print_task);
+  configASSERT(status == pdPASS);
 
-  switch_status = 0;
+  status = xTaskCreate(command_task_handler, "command_task", 200, NULL, 2, &handle_command_task);
+  configASSERT(status == pdPASS);
+
+//  Create Queues
+
+  q_input_data = xQueueCreate(10, sizeof(char));
+  configASSERT(q_input_data != NULL);
+
+  q_print_data = xQueueCreate(10, sizeof(size_t));
+  configASSERT(q_print_data  != NULL);
+
+//  Create Timers
+
+  for (int i = 0; i < 3; i++)
+  {
+	  led_timer[i] = xTimerCreate("led_timer", pdMS_TO_TICKS(500), pdTRUE, (void*)(i+1), led_timer_CallBack);
+	  configASSERT(led_timer[i] != NULL);
+  }
+
+  rtc_timer = xTimerCreate("rtc_timer", pdMS_TO_TICKS(1000), pdTRUE, (void*)(0), rtc_timer_CallBack);
+  configASSERT(rtc_timer != NULL);
+
+
+
+  HAL_UART_Receive_IT(&huart2, (uint8_t*)&user_data, 1);
+
 
 //  Start scheduler
   vTaskStartScheduler();
@@ -164,9 +198,11 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_LSI;
+  RCC_OscInitStruct.LSEState = RCC_LSE_OFF;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
   RCC_OscInitStruct.PLL.PLLM = 8;
@@ -202,6 +238,74 @@ void SystemClock_Config(void)
 }
 
 /**
+  * @brief RTC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_RTC_Init(void)
+{
+
+  /* USER CODE BEGIN RTC_Init 0 */
+
+  /* USER CODE END RTC_Init 0 */
+
+  /* USER CODE BEGIN RTC_Init 1 */
+
+  /* USER CODE END RTC_Init 1 */
+
+  /** Initialize RTC Only
+  */
+  hrtc.Instance = RTC;
+  hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
+  hrtc.Init.AsynchPrediv = 127;
+  hrtc.Init.SynchPrediv = 255;
+  hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
+  hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
+  hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
+  if (HAL_RTC_Init(&hrtc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN RTC_Init 2 */
+
+  /* USER CODE END RTC_Init 2 */
+
+}
+
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -226,14 +330,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : USART_TX_Pin USART_RX_Pin */
-  GPIO_InitStruct.Pin = USART_TX_Pin|USART_RX_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pin : LD2_Pin */
   GPIO_InitStruct.Pin = LD2_Pin;
@@ -263,79 +359,65 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-void vApplicationIdleHook(void)
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-//	SEGGER_SYSVIEW_PrintfTarget("Idle Hook");
-//	HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
-
-}
-
-void button_interrupt_handler(void)
-{
-
-	traceISR_ENTER();
-	switch_status = 1;
-	traceISR_EXIT();
-
-}
-
-
-static void red_led_handler(void* parameters)
-{
-	TickType_t lastWakeUpTime;
-	lastWakeUpTime = xTaskGetTickCount();
-
-	while(1)
+	uint8_t emptyPointer;
+//	Check if queue full
+	if (!xQueueIsQueueFullFromISR(q_input_data))
 	{
-//		toggle every 1 second
-		SEGGER_SYSVIEW_PrintfTarget("Toggle RED");
-		HAL_GPIO_TogglePin(EXT_LED_PORT, RED_LED_PIN);
-//		vTaskDelay(pdMS_TO_TICKS(1000));
-		vTaskDelayUntil(&lastWakeUpTime, pdMS_TO_TICKS(1000));
+//		Add the data in user_data to the queue.
+//		Stored in user data bc we set it up in main() with the interrupt
+		xQueueSendFromISR(q_input_data, (void*)&user_data, NULL);
 
-//		taskYIELD();
-	}
-}
-
-static void yellow_led_handler(void* parameters)
-{
-	TickType_t lastWakeUpTime;
-	lastWakeUpTime = xTaskGetTickCount();
-	while(1)
-	{
-//		Toggle every 800 ms
-		SEGGER_SYSVIEW_PrintfTarget("Toggle YELLOW");
-		HAL_GPIO_TogglePin(EXT_LED_PORT, YELLOW_LED_PIN);
-		vTaskDelayUntil(&lastWakeUpTime, pdMS_TO_TICKS(800));
-//		vTaskDelay(pdMS_TO_TICKS(800));
-
-//		taskYIELD();
-	}
-}
-
-/*
-static void onboard_led_handler(void* parameters)
-{
-	BaseType_t status;
-	while(1)
-	{
-//		toggle every 400 ms
-		SEGGER_SYSVIEW_PrintfTarget("Toggle ONBAORD");
-		HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
-
-		status = xTaskNotifyWait(0, 0, NULL, pdMS_TO_TICKS(400));
-		if (status == pdTRUE)
+	} else {
+		if (user_data == '\n')
 		{
-			portENTER_CRITICAL(); //Disable Interrupts while accessing shared variable
-
-			next_LED_handle = NULL;
-			HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET); //Turn on light before suspending
-			vTaskSuspend(onboard_led_handle);
-			portEXIT_CRITICAL();
-
+//			delete latest item from queue
+//			fill empty spot with user data
+			xQueueReceiveFromISR(q_input_data, (void*)&emptyPointer, NULL);
+			xQueueSendFromISR(q_input_data, (void*)&user_data, NULL);
 		}
 	}
-}*/
+
+	if (user_data == '\n')
+	{
+//		Notify command handler task that user entered a command
+		xTaskNotifyFromISR(handle_command_task,0, eNoAction, NULL);
+	}
+
+	HAL_UART_Receive_IT(&huart2, (uint8_t*)&user_data, 1);
+
+
+
+}
+
+
+void led_timer_CallBack(TimerHandle_t xTimer)
+{
+	int id;
+	id = (int)pvTimerGetTimerID(xTimer);
+
+	switch (id) {
+		case 1:
+			LED_effect_1();
+			break;
+		case 2:
+			LED_effect_2();
+			break;
+		case 3:
+			LED_effect_3();
+			break;
+		default:
+			break;
+	}
+
+}
+
+void rtc_timer_CallBack(TimerHandle_t xTimer)
+{
+	rtc_get_curr_date_time_itm();
+}
 
 /* USER CODE END 4 */
 
